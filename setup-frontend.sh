@@ -65,6 +65,113 @@ log "Active services OpenNebula"
 run "sudo systemctl enable opennebula opennebula-sunstone opennebula-fireedge"
 run "sudo systemctl start opennebula opennebula-sunstone opennebula-fireedge"
 
+# AJOUT Domaine / Apache / HTTPS
+if [[ -n "${FRONTEND_DOMAIN:-}" && "${ENABLE_APACHE_PROXY}" == "true" ]]; then
+  log "Configurer Apache comme reverse-proxy pour Sunstone via ${FRONTEND_DOMAIN}"
+  run "sudo apt install apache2 -y"
+  run "sudo a2enmod proxy proxy_http headers rewrite ssl >/dev/null || true"
+
+  # Option: /etc/hosts si pas de DNS
+  if [[ "${ADD_HOSTS_ENTRIES}" == "true" ]]; then
+    if ! grep -q \"${FRONTEND_DOMAIN}\" /etc/hosts; then
+      run "echo \"${FRONTEND_IP} ${FRONTEND_DOMAIN}\" | sudo tee -a /etc/hosts >/dev/null"
+    fi
+  fi
+
+  # vhost HTTP (port 80)
+  VHOST_HTTP="/etc/apache2/sites-available/sunstone-http.conf"
+  run "sudo bash -c 'cat > ${VHOST_HTTP} <<EOF
+<VirtualHost *:80>
+    ServerName ${FRONTEND_DOMAIN}
+    <IfModule mod_headers.c>
+      RequestHeader set X-Forwarded-Proto \"http\"
+    </IfModule>
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:${SUNSTONE_PORT}/
+    ProxyPassReverse / http://127.0.0.1:${SUNSTONE_PORT}/
+
+    ErrorLog \${APACHE_LOG_DIR}/sunstone_error.log
+    CustomLog \${APACHE_LOG_DIR}/sunstone_access.log combined
+</VirtualHost>
+EOF'"
+
+  run "sudo a2ensite sunstone-http >/dev/null"
+
+  # HTTPS avec cert existant (si LE activé plus bas ça réécrira)
+  if [[ -d /etc/letsencrypt/live/${FRONTEND_DOMAIN} ]]; then
+    VHOST_HTTPS="/etc/apache2/sites-available/sunstone-https.conf"
+    run "sudo bash -c 'cat > ${VHOST_HTTPS} <<EOF
+<VirtualHost *:443>
+    ServerName ${FRONTEND_DOMAIN}
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/${FRONTEND_DOMAIN}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${FRONTEND_DOMAIN}/privkey.pem
+
+    <IfModule mod_headers.c>
+      RequestHeader set X-Forwarded-Proto \"https\"
+    </IfModule>
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:${SUNSTONE_PORT}/
+    ProxyPassReverse / http://127.0.0.1:${SUNSTONE_PORT}/
+
+    ErrorLog \${APACHE_LOG_DIR}/sunstone_ssl_error.log
+    CustomLog \${APACHE_LOG_DIR}/sunstone_ssl_access.log combined
+</VirtualHost>
+EOF'"
+    run "sudo a2enmod ssl >/dev/null"
+    run "sudo a2ensite sunstone-https >/dev/null"
+
+    if [[ \"${FORCE_HTTP_REDIRECT_TO_HTTPS}\" == \"true\" ]]; then
+      # Petite redirection 80>443
+      REDIR_FILE="/etc/apache2/conf-available/sunstone-redirect.conf"
+      run "sudo bash -c 'cat > ${REDIR_FILE} <<EOF
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} !=on
+  RewriteRule ^/(.*)$ https://%{HTTP_HOST}/\$1 [R=301,L]
+</IfModule>
+EOF'"
+      run "sudo a2enconf sunstone-redirect >/dev/null"
+    fi
+  fi
+
+  run "sudo systemctl reload apache2 || sudo systemctl restart apache2"
+fi
+
+# Let’s Encrypt
+if [[ -n "${FRONTEND_DOMAIN:-}" && "${ENABLE_LETSENCRYPT}" == "true" ]]; then
+  log "Obtenir/renouveler certificat Let’s Encrypt pour ${FRONTEND_DOMAIN}"
+  run "sudo apt install -y certbot python3-certbot-apache"
+  STAGING_FLAG=""
+  if [[ \"${LETSENCRYPT_STAGING}\" == \"true\" ]]; then STAGING_FLAG=\"--staging\"; fi
+  if [[ -z \"${LETSENCRYPT_EMAIL}\" ]]; then
+    echo \"LETSENCRYPT_EMAIL est requis\"; exit 1
+  fi
+  # Non-interactif
+  run "sudo certbot --apache -d ${FRONTEND_DOMAIN} -m ${LETSENCRYPT_EMAIL} --agree-tos --redirect ${STAGING_FLAG} --non-interactive"
+
+  # (Ré)activer vhost HTTPS si besoin
+  VHOST_HTTPS="/etc/apache2/sites-available/sunstone-https.conf"
+  if [[ ! -f \"${VHOST_HTTPS}\" ]]; then
+    run "sudo a2enmod ssl >/dev/null || true"
+    run "sudo a2ensite sunstone-https >/dev/null || true"
+  fi
+  if [[ \"${FORCE_HTTP_REDIRECT_TO_HTTPS}\" == \"true\" ]]; then
+    REDIR_FILE="/etc/apache2/conf-available/sunstone-redirect.conf"
+    if [[ ! -f \"${REDIR_FILE}\" ]]; then
+      run "sudo bash -c 'cat > ${REDIR_FILE} <<EOF
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} !=on
+  RewriteRule ^/(.*)$ https://%{HTTP_HOST}/\$1 [R=301,L]
+</IfModule>
+EOF'"
+      run "sudo a2enconf sunstone-redirect >/dev/null"
+    fi
+  fi
+  run "sudo systemctl reload apache2 || sudo systemctl restart apache2"
+fi
+
 log "Infos Sunstone"
 echo "URL:  http://${FRONTEND_IP}:${SUNSTONE_PORT}/"
 echo "User: oneadmin"
