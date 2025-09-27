@@ -136,6 +136,22 @@ if [[ "$ROLE" == "node" ]]; then
   fi
 fi
 
+# 7bis) Domaine / DNS quand FRONTEND_DOMAIN défini
+if [[ -n "${FRONTEND_DOMAIN:-}" && "${ROLE}" == "frontend" ]]; then
+  section "DNS / Domaine (${FRONTEND_DOMAIN})"
+  if getent hosts "${FRONTEND_DOMAIN}" >/dev/null 2>&1; then
+    RESOLVED_IP="$(getent hosts "${FRONTEND_DOMAIN}" | awk '{print $1}' | head -n1)"
+    echo "Résolution: ${FRONTEND_DOMAIN} -> ${RESOLVED_IP}"
+    if [[ -n "${FRONTEND_IP:-}" && "${RESOLVED_IP}" == "${FRONTEND_IP}" ]]; then
+      ok "Le FQDN pointe bien sur FRONTEND_IP (${FRONTEND_IP})"
+    else
+      ww "Le FQDN ne pointe pas sur FRONTEND_IP (${FRONTEND_IP}). Pense à corriger DNS ou /etc/hosts"
+    fi
+  else
+    ww "Le FQDN ${FRONTEND_DOMAIN} ne résout pas (DNS manquant ?)"
+  fi
+fi
+
 # 8) Résumé
 section "Résumé"
 echo "PASS: $pass  WARN: $warn  FAIL: $fail"
